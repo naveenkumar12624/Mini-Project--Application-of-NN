@@ -60,9 +60,12 @@ for url in urls:
 ```python
 import cv2
 import os
-import math
-import argparse
 import sys
+import requests
+from io import BytesIO
+from PIL import Image
+import numpy as np
+import matplotlib.pyplot as plt
 
 def highlightFace(net, frame, conf_threshold=0.7):
     frameOpencvDnn = frame.copy()
@@ -84,32 +87,34 @@ def highlightFace(net, frame, conf_threshold=0.7):
             cv2.rectangle(frameOpencvDnn, (x1, y1), (x2, y2), (0, 255, 0), int(round(frameHeight / 150)), 8)
     return frameOpencvDnn, faceBoxes
 
+def load_image_from_url(url):
+    try:
+        response = requests.get(url)
+        img = Image.open(BytesIO(response.content))
+        img = np.array(img)  # Convert PIL Image to NumPy array
+        if img.shape[2] == 4:  # If PNG with alpha channel, convert to BGR
+            img = cv2.cvtColor(img, cv2.COLOR_RGBA2BGR)
+        else:
+            img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+        return img
+    except Exception as e:
+        print(f"Could not load image from URL: {e}")
+        return None
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--image', help="Path to image file. If not specified, webcam will be used", default=None)
+    # Define paths and URL (use one of these)
+    image_path = 'B:/OneDrive/Pictures/PERSONAL/212221240033.png'  # Local path example
+    
+    #else
+    image_url = 'https://example.com/image.jpg'  # Web URL example
 
-    # Check if we are running in Jupyter or command line
-    if sys.argv[0].endswith('ipykernel_launcher.py'):
-        args = parser.parse_args(args=[])  # Bypass unrecognized arguments in Jupyter
-    else:
-        args = parser.parse_args()
-        
-
+    # Define file paths for models
     faceProto = "opencv_face_detector.pbtxt"
     faceModel = "opencv_face_detector_uint8.pb"
     ageProto = "age_deploy.prototxt"
     ageModel = "age_net.caffemodel"
     genderProto = "gender_deploy.prototxt"
     genderModel = "gender_net.caffemodel"
-
-    print("Checking if files exist:")
-    print("Face Model Path Exists:", os.path.isfile(faceModel))
-    print("Face Proto Path Exists:", os.path.isfile(faceProto))
-    print("Age Model Path Exists:", os.path.isfile(ageModel))
-    print("Age Proto Path Exists:", os.path.isfile(ageProto))
-    print("Gender Model Path Exists:", os.path.isfile(genderModel))
-    print("Gender Proto Path Exists:", os.path.isfile(genderProto))
 
     MODEL_MEAN_VALUES = (78.4263377603, 87.7689143744, 114.895847746)
     ageList = ['(0-2)', '(4-6)', '(8-12)', '(15-20)', '(25-32)', '(38-43)', '(48-53)', '(60-100)']
@@ -120,43 +125,55 @@ if __name__ == "__main__":
     ageNet = cv2.dnn.readNet(ageModel, ageProto)
     genderNet = cv2.dnn.readNet(genderModel, genderProto)
 
-    # Capture video from file or webcam
-    video = cv2.VideoCapture(args.image if args.image else 0)
+    # Try to read the image from the local path
+    frame = cv2.imread(image_path)
+    if frame is None:  # If the local image path is incorrect or image cannot be read
+        print(f"Could not read image at {image_path}, trying to load from URL...")
+        frame = load_image_from_url(image_url)
+
+    if frame is None:  # If both the local image and the URL failed
+        print(f"Could not read image from URL, switching to live camera...")
+        video = cv2.VideoCapture(0)  # Switch to live camera
+        ret, frame = video.read()
+        if not ret:
+            print("Failed to capture from webcam")
+            sys.exit(1)
+        video.release()
+
     padding = 20
 
-    while cv2.waitKey(1) < 0:
-        hasFrame, frame = video.read()
-        if not hasFrame:
-            cv2.waitKey()
-            break
+    # Detect faces
+    resultImg, faceBoxes = highlightFace(faceNet, frame)
+    if not faceBoxes:
+        print("No face detected")
 
-        # Detect faces
-        resultImg, faceBoxes = highlightFace(faceNet, frame)
-        if not faceBoxes:
-            print("No face detected")
+    for faceBox in faceBoxes:
+        face = frame[max(0, faceBox[1] - padding): min(faceBox[3] + padding, frame.shape[0] - 1),
+                     max(0, faceBox[0] - padding): min(faceBox[2] + padding, frame.shape[1] - 1)]
 
-        # Loop over detected faces
-        for faceBox in faceBoxes:
-            face = frame[max(0, faceBox[1] - padding): min(faceBox[3] + padding, frame.shape[0] - 1),
-                         max(0, faceBox[0] - padding): min(faceBox[2] + padding, frame.shape[1] - 1)]
+        blob = cv2.dnn.blobFromImage(face, 1.0, (227, 227), MODEL_MEAN_VALUES, swapRB=False)
 
-            blob = cv2.dnn.blobFromImage(face, 1.0, (227, 227), MODEL_MEAN_VALUES, swapRB=False)
+        # Predict gender
+        genderNet.setInput(blob)
+        genderPreds = genderNet.forward()
+        gender = genderList[genderPreds[0].argmax()]
+        print(f'Gender: {gender}')
 
-            # Predict gender
-            genderNet.setInput(blob)
-            genderPreds = genderNet.forward()
-            gender = genderList[genderPreds[0].argmax()]
-            print(f'Gender: {gender}')
+        # Predict age
+        ageNet.setInput(blob)
+        agePreds = ageNet.forward()
+        age = ageList[agePreds[0].argmax()]
+        print(f'Age: {age[1:-1]} years')
 
-            # Predict age
-            ageNet.setInput(blob)
-            agePreds = ageNet.forward()
-            age = ageList[agePreds[0].argmax()]
-            print(f'Age: {age[1:-1]} years')
-
-            # Display results on image
-            cv2.putText(resultImg, f'{gender}, {age}', (faceBox[0], faceBox[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
-            cv2.imshow("Detecting age and gender", resultImg)
+        # Display results on image
+        cv2.putText(resultImg, f'{gender}, {age}', (faceBox[0], faceBox[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv2.LINE_AA)
+    
+    # Display the final image with detections using matplotlib
+    captured_frame_rgb = cv2.cvtColor(resultImg, cv2.COLOR_BGR2RGB)
+    plt.imshow(captured_frame_rgb)
+    plt.title("Age and Gender Detection")
+    plt.axis('off')  # Hide axis
+    plt.show()
 ```
 
 ## Output:
